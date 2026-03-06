@@ -1,0 +1,25 @@
+// A simple Attractor pipeline example
+digraph SimplePipeline {
+  graph [
+    goal="Build a hello world application",
+    default_fidelity="compact",
+    model_stylesheet="
+      * { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }
+      .reasoning { reasoning_effort: high; }
+    "
+  ]
+
+  // Pipeline stages
+  start [shape=Mdiamond, label="Begin"]
+  plan [shape=box, prompt="Create a plan to: $goal", class="reasoning"]
+  implement [shape=box, prompt="Implement the plan from the previous step for: $goal"]
+  review [shape=diamond, label="Review"]
+  fix [shape=box, prompt="Fix the issues found during review for: $goal"]
+  done [shape=Msquare, label="Complete"]
+
+  // Flow
+  start -> plan -> implement -> review
+  review -> done [condition="outcome=success", label="Approved"]
+  review -> fix [condition="outcome=fail", label="Needs fixes"]
+  fix -> review
+}
