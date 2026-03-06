@@ -1,0 +1,148 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+
+use Getopt::Long;
+use File::Slurp;
+
+use Attractor;
+use Attractor::Pipeline::Engine;
+use Attractor::Pipeline::Interviewer::Console;
+use Attractor::Pipeline::Interviewer::AutoApprove;
+use Attractor::Agent::Session;
+use Attractor::Agent::Environment::Local;
+
+my %opts = (
+    model        => 'claude-sonnet-4-5',
+    logs_root    => '/tmp/attractor_runs',
+    auto_approve => 0,
+    validate_only => 0,
+);
+
+GetOptions(
+    'pipeline=s'     => \$opts{pipeline},
+    'model=s'        => \$opts{model},
+    'logs-root=s'    => \$opts{logs_root},
+    'auto-approve'   => \$opts{auto_approve},
+    'validate-only'  => \$opts{validate_only},
+    'resume=s'       => \$opts{resume},
+    'cwd=s'          => \$opts{cwd},
+    'help'           => \$opts{help},
+) or die usage();
+
+if ($opts{help}) {
+    print usage();
+    exit 0;
+}
+
+unless ($opts{pipeline} || $opts{resume}) {
+    die "Error: --pipeline <file.dot> or --resume <run_dir> required\n\n" . usage();
+}
+
+# Set up execution environment
+my $cwd = $opts{cwd} // '.';
+my $env = Attractor::Agent::Environment::Local->new(cwd => $cwd);
+
+# Set up interviewer
+my $interviewer = $opts{auto_approve}
+    ? Attractor::Pipeline::Interviewer::AutoApprove->new()
+    : Attractor::Pipeline::Interviewer::Console->new();
+
+# Set up agent session for LLM tasks
+my $session = Attractor::Agent::Session->new(
+    model => $opts{model},
+    cwd   => $cwd,
+    env   => $env,
+);
+
+# Set up engine
+my $engine = Attractor::Pipeline::Engine->new(
+    session     => $session,
+    env         => $env,
+    interviewer => $interviewer,
+    logs_root   => $opts{logs_root},
+);
+
+# Event logging
+$engine->{emitter}->on(sub {
+    my ($event) = @_;
+    printf STDERR "[%s] %s: %s\n",
+        scalar localtime($event->timestamp),
+        $event->type,
+        _summarize($event->data);
+});
+
+if ($opts{resume}) {
+    # Resume from checkpoint
+    my $result = $engine->resume($opts{resume});
+    _print_result($result);
+}
+else {
+    # Run pipeline
+    my $source = do {
+        open my $fh, '<', $opts{pipeline}
+            or die "Cannot read pipeline file '$opts{pipeline}': $!\n";
+        local $/;
+        <$fh>;
+    };
+
+    if ($opts{validate_only}) {
+        eval {
+            $engine->parse($source);
+            $engine->validate();
+        };
+        if ($@) {
+            print STDERR "Validation failed: $@\n";
+            exit 1;
+        }
+        print "Pipeline is valid.\n";
+        exit 0;
+    }
+
+    my $result = $engine->run($source);
+    _print_result($result);
+}
+
+sub _print_result {
+    my ($result) = @_;
+    print "\n=== Pipeline Result ===\n";
+    print "Outcome: $result->{outcome}\n";
+    print "Stages completed: " . scalar(@{$result->{completed}}) . "\n";
+    if (@{$result->{failed_gates} // []}) {
+        print "Failed gates: " . join(', ', @{$result->{failed_gates}}) . "\n";
+    }
+}
+
+sub _summarize {
+    my ($data) = @_;
+    return '' unless ref $data eq 'HASH';
+    return join(', ', map { "$_=$data->{$_}" }
+        grep { defined $data->{$_} && !ref $data->{$_} }
+        sort keys %$data);
+}
+
+sub usage {
+    return <<'USAGE';
+Usage: attractor [options]
+
+Options:
+  --pipeline <file>   DOT pipeline file to execute
+  --model <name>      LLM model to use (default: claude-sonnet-4-5)
+  --logs-root <dir>   Directory for run logs (default: /tmp/attractor_runs)
+  --auto-approve      Auto-approve all human gates
+  --validate-only     Only validate the pipeline, don't execute
+  --resume <dir>      Resume from a checkpoint directory
+  --cwd <dir>         Working directory for tool execution
+  --help              Show this help message
+
+Example:
+  attractor --pipeline workflow.dot --model claude-sonnet-4-5
+  attractor --pipeline workflow.dot --validate-only
+  attractor --resume /tmp/attractor_runs/12345_67890
+
+USAGE
+}
